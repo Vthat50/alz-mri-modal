@@ -5,92 +5,122 @@ from fastsurfer import run_fastsurfer, parse_stats, predict_stage, generate_summ
 import os
 import uuid
 import base64
-from modal import Secret, Image, Volume
 
-# Modal setup
-image = Image.from_dockerhub("deepmi/fastsurfer:cu124-v2.3.3").pip_install(
-    "openai",
-    "python-dotenv",
-    "fpdf2",
-    "gunicorn"
+# Modal configuration
+image = modal.Image.from_dockerhub("deepmi/fastsurfer:cu124-v2.3.3").pip_install(
+    "openai==1.12.0",
+    "python-dotenv==1.0.0",
+    "fpdf2==2.7.4",
+    "gunicorn==21.2.0"
 )
 
-stub = modal.Stub("alz-mri-gpu", image=image)
-volume = Volume.persisted("fastsurfer-data")
+stub = modal.Stub("alz-mri-prod", image=image)
+volume = modal.Volume.persisted("mri-data")
 
+# FastAPI app setup
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"]
 )
 
 @stub.function(
     gpu="T4",
-    volumes={"/output": volume},
+    volumes={"/data": volume},
     timeout=3600,
-    secrets=[Secret.from_name("openai-key")]  # Injects OpenAI key
+    secrets=[modal.Secret.from_name("openai-key")]
 )
 def process_mri(file_contents: bytes, filename: str):
-    """Process MRI with GPU acceleration"""
+    """Process MRI scan with FastSurfer"""
     subject_id = f"sub-{uuid.uuid4().hex[:8]}"
-    input_path = f"/tmp/{filename}"
+    input_path = f"/data/{filename}"
     
+    # Save uploaded file
     with open(input_path, "wb") as f:
         f.write(file_contents)
     
+    # Run FastSurfer processing
     run_fastsurfer(input_path, subject_id)
     return subject_id
 
 @stub.function(
-    volumes={"/output": volume},
-    secrets=[Secret.from_name("openai-key")]  # Available for GPT-4 summary
+    volumes={"/data": volume},
+    secrets=[modal.Secret.from_name("openai-key")]
 )
-def get_results(subject_id: str, mmse: int, cdr: float, adas_cog: float):
-    """Retrieve processed results with GPT-4 analysis"""
+def generate_report(subject_id: str, mmse: int, cdr: float, adas_cog: float):
+    """Generate full analysis report"""
+    # Parse biomarkers
     biomarkers = parse_stats(subject_id)
-    seg_path = f"/output/{subject_id}/mri/aparc+aseg.png"
     
+    # Get segmentation preview
+    seg_path = f"/data/{subject_id}/mri/aparc+aseg.png"
     with open(seg_path, "rb") as f:
         seg_base64 = base64.b64encode(f.read()).decode()
-
-    summary = generate_summary(biomarkers, mmse, cdr, adas_cog)
-    pdf = create_pdf(summary)
-
+    
+    # Generate components
     return {
-        "biomarkers": biomarkers,
+        "biomarkers": {
+            "Left Hippocampus": biomarkers["Left Hippocampus"],
+            "Right Hippocampus": biomarkers["Right Hippocampus"],
+            "Asymmetry Index": biomarkers["Asymmetry Index"],
+            "Evans Index": biomarkers["Evans Index"],
+            "Average Cortical Thickness": biomarkers["Average Cortical Thickness"]
+        },
         "stage": predict_stage(mmse, cdr, adas_cog),
-        "summary": summary,
+        "summary": generate_summary(biomarkers, mmse, cdr, adas_cog),
         "segmentation": seg_base64,
-        "pdf": base64.b64encode(pdf).decode()
+        "pdf_report": base64.b64encode(create_pdf(summary)).decode()
     }
 
-@stub.asgi()
-def fastapi_app():
-    @app.post("/upload-mri/")
+@stub.asgi(live=True)  # Enable live reloading during development
+def web_app():
+    @app.post("/api/upload")
     async def upload_mri(file: UploadFile = File(...)):
-        subject_id = process_mri.remote(await file.read(), file.filename)
-        return {"message": "Processing started", "subject_id": subject_id}
+        try:
+            subject_id = process_mri.remote(
+                await file.read(),
+                file.filename
+            )
+            return {
+                "status": "success",
+                "subject_id": subject_id,
+                "message": "MRI processing started"
+            }
+        except Exception as e:
+            return {
+                "status": "error",
+                "message": str(e)
+            }
 
-    @app.post("/analyze-scores/")
-    async def analyze_scores(
+    @app.post("/api/analyze")
+    async def analyze_results(
         subject_id: str = Form(...),
         mmse: int = Form(...),
         cdr: float = Form(...),
         adas_cog: float = Form(...)
     ):
-        results = get_results.remote(subject_id, mmse, cdr, adas_cog)
-        return {
-            "🧠 Clinical Biomarkers": results["biomarkers"],
-            "🧬 Disease Stage": results["stage"],
-            "📋 GPT Summary": results["summary"],
-            "🧠 Brain Segmentation Preview (base64)": results["segmentation"],
-            "🧾 PDF Report": results["pdf"]
-        }
+        try:
+            report = generate_report.remote(
+                subject_id,
+                mmse,
+                cdr,
+                adas_cog
+            )
+            return {
+                "status": "success",
+                "data": report
+            }
+        except Exception as e:
+            return {
+                "status": "error",
+                "message": str(e)
+            }
 
-    @app.get("/")
+    @app.get("/health")
     def health_check():
-        return {"status": "OK", "gpu_available": True}
+        return {"status": "healthy"}
 
     return app
