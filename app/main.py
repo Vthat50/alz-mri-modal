@@ -1,4 +1,3 @@
-
 import modal
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
