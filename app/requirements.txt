@@ -1,0 +1,5 @@
+fastapi>=0.95.2
+openai>=0.27.8
+python-dotenv>=1.0.0
+fpdf2>=2.7.4
+gunicorn>=20.1.0
