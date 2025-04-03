@@ -56,4 +56,4 @@ def analyze(
     }
 
 # 6. CRITICAL - Must be at absolute bottom of file
-stub.app = app
+app = FastAPI() 
