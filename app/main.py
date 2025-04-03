@@ -1,24 +1,19 @@
 import modal
 from fastapi import FastAPI, UploadFile, File, Form
 
-# 1. Create stub FIRST (critical in v0.73.141)
-stub = modal.Stub("alz-mri-working")
+# 1. First create stub (MUST be named 'stub')
+stub = modal.Stub("alz-mri-final-fix")
 
-# 2. Define image and volume
+# 2. Define image/volume OUTSIDE functions
 image = modal.Image.from_dockerhub("deepmi/fastsurfer:cu124-v2.3.3").pip_install(
-    "openai",
-    "python-dotenv",
-    "fpdf2",
-    "gunicorn"
+    "openai", "python-dotenv", "fpdf2", "gunicorn"
 )
-volume = modal.Volume.persisted("mri-data-working")
+volume = modal.Volume.persisted("mri-data-final")
 
-# 3. Create FastAPI app INSIDE a function
-def create_app():
-    app = FastAPI()
-    return app
+# 3. Create FastAPI app INLINE (not in a function)
+app = FastAPI()
 
-# 4. Processing functions (all imports inside)
+# 4. Processing functions with LOCAL imports
 @stub.function(
     image=image,
     gpu="T4",
@@ -36,7 +31,7 @@ def process_mri(file_contents: bytes, filename: str):
     run_fastsurfer(input_path, subject_id)
     return subject_id
 
-# 5. Webhook endpoints (v0.73.141 style)
+# 5. Webhook endpoints (v0.73.141 syntax)
 @stub.webhook(method="POST")
 def upload(file: UploadFile = File(...)):
     return {"subject_id": process_mri.call(file.file.read(), file.filename)}
@@ -60,6 +55,5 @@ def analyze(
         "segmentation": seg_base64
     }
 
-# 6. MUST COME LAST - Bind FastAPI app
-app = create_app()
+# 6. CRITICAL - Must be at absolute bottom of file
 stub.app = app
